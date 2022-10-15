@@ -14,7 +14,13 @@ RESULTS_FILE = 'results.json'
 THREAD_POOL_SIZE = 20
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
+log_formatter = logging.Formatter("[%(threadName)s]: %(message)s")
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+logger.removeHandler(logger.handlers)
+logger.addHandler(console_handler)
 
 
 def find_download_header(soup: BeautifulSoup) -> str:
@@ -37,11 +43,11 @@ def scrape(_id: int):
                 result['download_header'] = find_download_header(soup)
     except HTTPError as e:
         result['status'] = e.code
-        logger.error(f'ID: {_id}, http error: {e.code}')
+        logger.debug(f'ID: {_id}, http error: {e.code}')
     except Exception as e:
-        logger.error(f'ID: {_id}, error: {e.__class__.__name__}: {e.msg}')
+        logger.debug(f'ID: {_id}, error: {e.__class__.__name__}: {e.msg}')
     finally:
-        logger.info(f'Result for ID {_id}, {result}')
+        logger.debug(f'Result for ID {_id}, {result}')
         return result
 
 
@@ -62,7 +68,7 @@ def save_results(results):
         json.dump(results, rf)
 
 
-def thread_target(ids: Queue, results: Queue):
+def spider(ids: Queue, results: Queue):
     while True:
         _id = ids.get()
         result = scrape(_id)
@@ -77,8 +83,10 @@ def main():
     
     id_queue = Queue()
     result_queue = Queue()
-    threads = [Thread(target=thread_target, args=(id_queue, result_queue), daemon=True)
+    threads = [Thread(target=spider, args=(id_queue, result_queue), daemon=True)
                for _ in range(THREAD_POOL_SIZE)]
+    
+    logger.info(f'Starting scraping from id {current_id}')
     for t in threads:
         t.start()
     
@@ -95,6 +103,7 @@ def main():
                 for _ in range(50):
                     _id, result = result_queue.get()
                     results[_id] = result
+                logger.info(f'Scraped up to ID: {_id}')
                 save_results(results)
     finally:
         save_results(results)
