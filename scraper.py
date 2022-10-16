@@ -1,15 +1,14 @@
-import json
 import logging
-import os
+import sqlite3
 from queue import Queue
-from threading import Thread
+from threading import Event, Thread
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from bs4 import BeautifulSoup
 
 BASE_URL = 'https://www.microsoft.com/en-us/download/details.aspx?id={}'
-RESULTS_FILE = 'results.json'
+RESULTS_DB = 'results.db'
 
 THREAD_POOL_SIZE = 20
 
@@ -29,67 +28,121 @@ def find_download_header(soup: BeautifulSoup) -> str:
 
 
 def scrape(_id: int):
-    result = {
-        'status': 0,
-        'title': '',
-        'download_header': ''
-    }
+    status = 0
+    title = ''
+    download_header = ''
+
     try:
         with urlopen(BASE_URL.format(_id)) as response:
-            result['status'] = response.status
+            status = response.status
             if response.status == 200:
                 soup = BeautifulSoup(response, 'html.parser')
-                result['title'] = soup.title.text
-                result['download_header'] = find_download_header(soup)
+                title = soup.title.text
+                download_header = find_download_header(soup)
     except HTTPError as e:
-        result['status'] = e.code
+        status = e.code
         logger.debug(f'ID: {_id}, http error: {e.code}')
     except Exception as e:
         logger.debug(f'ID: {_id}, error: {e.__class__.__name__}: {e.msg}')
     finally:
-        logger.debug(f'Result for ID {_id}, {result}')
-        return result
-
-
-def get_results():
-    results = {}
-    if not os.path.exists(RESULTS_FILE):
-        save_results(results)
-        return results
-
-    with open(RESULTS_FILE, 'r') as rf:
-        results = json.load(rf)
-
-    return results
-
-
-def save_results(results):
-    with open(RESULTS_FILE, 'w') as rf:
-        json.dump(results, rf)
+        logger.debug(
+            f'Result for ID {_id}, {status}, {title}, {download_header}')
+        return status, title, download_header
 
 
 def spider(ids: Queue, results: Queue):
     while True:
         _id = ids.get()
         result = scrape(_id)
-        results.put((_id, result))
+        results.put((_id, *result))
+
+
+def get_last_id(con: sqlite3.Connection):
+    ensure_results_table(con)
+    cur = con.cursor()
+    res = cur.execute('SELECT id FROM results ORDER BY id DESC LIMIT 1')
+    max_id = res.fetchone()
+
+    if max_id is None:
+        return 0
+
+    return max_id[0]
+
+
+def get_missing_ids(con: sqlite3.Connection):
+    ensure_results_table(con)
+    cur = con.cursor()
+    missing_ids = []
+
+    last_id = get_last_id(con)
+    res = cur.execute('SELECT COUNT(id) FROM results')
+
+    if last_id == res.fetchone()[0]:
+        return missing_ids
+
+    for i in range(1, last_id + 1):
+        res = cur.execute('SELECT id FROM results WHERE id = ?', (i,))
+        if res.fetchone() is None:
+            missing_ids.append(i)
+
+    return missing_ids
+
+
+def ensure_results_table(con: sqlite3.Connection):
+    cur = con.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS results (
+            id INT PRIMARY KEY,
+            status INT,
+            title TEXT,
+            download_header TEXT
+        );
+    ''')
+
+
+def archiver(results: Queue, stop: Event):
+    con = sqlite3.connect(RESULTS_DB)
+    ensure_results_table(con)
+    cur = con.cursor()
+    count = 0
+
+    try:
+        while not stop.is_set():
+            result = results.get()
+            count += 1
+            if count % 50 == 0:
+                logger.info(f'Archived 50 URLs, last id: {result[0]}')
+            
+            logger.debug(f'Inserting result with id {result[0]}')
+            cur.execute('INSERT INTO results VALUES(?, ?, ?, ?)', result)
+            con.commit()
+    finally:
+        con.close()
 
 
 def main():
-    results = get_results()
-    current_id = 1
-    if len(results.keys()) > 0:
-        current_id = max(int(i) for i in results.keys()) + 1
-    
+    con = sqlite3.connect(RESULTS_DB)
+    current_id = get_last_id(con) + 1
+    missing_ids = get_missing_ids(con)
+
     id_queue = Queue()
+    for _id in missing_ids:
+        id_queue.put(_id)
+
     result_queue = Queue()
+    archiver_stop = Event()
+    archiver_thread = Thread(target=archiver, args=(
+        result_queue, archiver_stop), daemon=True)
+    archiver_thread.start()
+
     threads = [Thread(target=spider, args=(id_queue, result_queue), daemon=True)
                for _ in range(THREAD_POOL_SIZE)]
-    
+
     logger.info(f'Starting scraping from id {current_id}')
+    logger.info(f'Initializing {THREAD_POOL_SIZE} spiders')
     for t in threads:
         t.start()
-    
+
     try:
         while True:
             # Populate id_queue
@@ -97,16 +150,10 @@ def main():
                 for _id in range(current_id, current_id+10000):
                     id_queue.put(_id)
                 current_id = current_id + 10000
-
-            # Add to results
-            if result_queue.qsize() > 50:
-                for _ in range(50):
-                    _id, result = result_queue.get()
-                    results[_id] = result
-                logger.info(f'Scraped up to ID: {_id}')
-                save_results(results)
     finally:
-        save_results(results)
+        archiver_stop.set()
+        archiver_thread.join()
+        con.close()
 
 
 if __name__ == '__main__':
