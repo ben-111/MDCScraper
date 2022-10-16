@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 BASE_URL = 'https://www.microsoft.com/en-us/download/details.aspx?id={}'
 RESULTS_DB = 'results.db'
+REQUEST_TIMEOUT = 2
 
 THREAD_POOL_SIZE = 20
 
@@ -33,7 +34,7 @@ def scrape(_id: int):
     download_header = ''
 
     try:
-        with urlopen(BASE_URL.format(_id)) as response:
+        with urlopen(BASE_URL.format(_id), timeout=REQUEST_TIMEOUT) as response:
             status = response.status
             if response.status == 200:
                 soup = BeautifulSoup(response, 'html.parser')
@@ -43,7 +44,7 @@ def scrape(_id: int):
         status = e.code
         logger.debug(f'ID: {_id}, http error: {e.code}')
     except Exception as e:
-        logger.debug(f'ID: {_id}, error: {e.__class__.__name__}: {e.msg}')
+        logger.error(f'ID: {_id}, error: {e.__class__.__name__}: {e.msg}')
     finally:
         logger.debug(
             f'Result for ID {_id}, {status}, {title}, {download_header}')
@@ -138,11 +139,11 @@ def main():
     threads = [Thread(target=spider, args=(id_queue, result_queue), daemon=True)
                for _ in range(THREAD_POOL_SIZE)]
 
-    logger.info(f'Starting scraping from id {current_id}')
     logger.info(f'Initializing {THREAD_POOL_SIZE} spiders')
     for t in threads:
         t.start()
 
+    logger.info(f'Starting scraping from id {current_id}')
     try:
         while True:
             # Populate id_queue
@@ -151,6 +152,7 @@ def main():
                     id_queue.put(_id)
                 current_id = current_id + 10000
     finally:
+        logger.info('Shutting down')
         archiver_stop.set()
         archiver_thread.join()
         con.close()

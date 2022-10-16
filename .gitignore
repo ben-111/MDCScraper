@@ -1,3 +1,4 @@
 __pycache__/
 *.py[cod]
 results.db
+results.db-journal
