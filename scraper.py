@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import ssl
 from queue import Queue
 from threading import Event, Thread
 from time import sleep
@@ -14,6 +15,10 @@ REQUEST_TIMEOUT = 2
 
 THREAD_POOL_SIZE = 5
 RPM = 500  # Requests Per Minute
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -36,7 +41,7 @@ def scrape(_id: int):
     download_header = ''
 
     try:
-        with urlopen(BASE_URL.format(_id), timeout=REQUEST_TIMEOUT) as response:
+        with urlopen(BASE_URL.format(_id), timeout=REQUEST_TIMEOUT, context=ctx) as response:
             status = response.status
             if response.status == 200:
                 soup = BeautifulSoup(response, 'html.parser')
