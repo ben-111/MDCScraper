@@ -2,6 +2,7 @@ import logging
 import sqlite3
 from queue import Queue
 from threading import Event, Thread
+from time import sleep
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -11,7 +12,8 @@ BASE_URL = 'https://www.microsoft.com/en-us/download/details.aspx?id={}'
 RESULTS_DB = 'results.db'
 REQUEST_TIMEOUT = 2
 
-THREAD_POOL_SIZE = 20
+THREAD_POOL_SIZE = 5
+RPM = 500 # Requests Per Minute
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -147,10 +149,10 @@ def main():
     try:
         while True:
             # Populate id_queue
-            if id_queue.qsize() < 5000:
-                for _id in range(current_id, current_id+10000):
-                    id_queue.put(_id)
-                current_id = current_id + 10000
+            for _id in range(current_id, current_id + RPM):
+                id_queue.put(_id)
+            current_id = current_id + RPM
+            sleep(60)
     finally:
         logger.info('Shutting down')
         archiver_stop.set()
