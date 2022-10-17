@@ -1,3 +1,4 @@
+import argparse
 import logging
 import sqlite3
 import ssl
@@ -10,18 +11,12 @@ from urllib.request import urlopen
 from bs4 import BeautifulSoup
 
 BASE_URL = 'https://www.microsoft.com/en-us/download/details.aspx?id={}'
-RESULTS_DB = 'results.db'
-REQUEST_TIMEOUT = 2
-
-THREAD_POOL_SIZE = 5
-RPM = 500  # Requests Per Minute
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 log_formatter = logging.Formatter("[%(threadName)s]: %(message)s")
 
 console_handler = logging.StreamHandler()
@@ -35,13 +30,13 @@ def find_download_header(soup: BeautifulSoup) -> str:
     return div.h2.text.strip()
 
 
-def scrape(_id: int):
+def scrape(_id: int, timeout: int):
     status = 0
     title = ''
     download_header = ''
 
     try:
-        with urlopen(BASE_URL.format(_id), timeout=REQUEST_TIMEOUT, context=ctx) as response:
+        with urlopen(BASE_URL.format(_id), timeout=timeout, context=ctx) as response:
             status = response.status
             if response.status == 200:
                 soup = BeautifulSoup(response, 'html.parser')
@@ -58,10 +53,10 @@ def scrape(_id: int):
         return status, title, download_header
 
 
-def spider(ids: Queue, results: Queue):
+def spider(options: argparse.Namespace, ids: Queue, results: Queue):
     while True:
         _id = ids.get()
-        result = scrape(_id)
+        result = scrape(_id, options.timeout)
         results.put((_id, *result))
 
 
@@ -78,21 +73,29 @@ def get_last_id(con: sqlite3.Connection):
 
 
 def get_missing_ids(con: sqlite3.Connection):
+    logger.debug('Finding missing IDs from the DB')
     ensure_results_table(con)
     cur = con.cursor()
     missing_ids = []
 
     last_id = get_last_id(con)
     res = cur.execute('SELECT COUNT(id) FROM results')
+    rows = res.fetchone()[0]
+    missing_ids_count = last_id - rows
 
-    if last_id == res.fetchone()[0]:
+    if missing_ids_count == 0:
         return missing_ids
 
     for i in range(1, last_id + 1):
         res = cur.execute('SELECT id FROM results WHERE id = ?', (i,))
         if res.fetchone() is None:
             missing_ids.append(i)
+            missing_ids_count -= 1
+            if missing_ids_count == 0:
+                break
 
+    logger.info(
+        f'Found {len(missing_ids)} missing IDs, starting with {min(missing_ids)}')
     return missing_ids
 
 
@@ -108,8 +111,8 @@ def ensure_results_table(con: sqlite3.Connection):
     ''')
 
 
-def archiver(results: Queue, stop: Event):
-    con = sqlite3.connect(RESULTS_DB)
+def archiver(options: argparse.Namespace, results: Queue, stop: Event):
+    con = sqlite3.connect(options.output)
     ensure_results_table(con)
     cur = con.cursor()
     count = 0
@@ -128,8 +131,9 @@ def archiver(results: Queue, stop: Event):
         con.close()
 
 
-def main():
-    con = sqlite3.connect(RESULTS_DB)
+def main(options: argparse.Namespace):
+    logger.info(f'Starting scraper with arguments: {options}')
+    con = sqlite3.connect(options.output)
     current_id = get_last_id(con) + 1
     missing_ids = get_missing_ids(con)
 
@@ -140,13 +144,13 @@ def main():
     result_queue = Queue()
     archiver_stop = Event()
     archiver_thread = Thread(target=archiver, args=(
-        result_queue, archiver_stop), daemon=True)
+        options, result_queue, archiver_stop), daemon=True)
     archiver_thread.start()
 
-    threads = [Thread(target=spider, args=(id_queue, result_queue), daemon=True)
-               for _ in range(THREAD_POOL_SIZE)]
+    threads = [Thread(target=spider, args=(options, id_queue, result_queue), daemon=True)
+               for _ in range(options.workers)]
 
-    logger.info(f'Initializing {THREAD_POOL_SIZE} spiders')
+    logger.info(f'Initializing {options.workers} spiders')
     for t in threads:
         t.start()
 
@@ -154,9 +158,9 @@ def main():
     try:
         while True:
             # Populate id_queue
-            for _id in range(current_id, current_id + RPM):
+            for _id in range(current_id, current_id + options.rate_limit):
                 id_queue.put(_id)
-            current_id = current_id + RPM
+            current_id = current_id + options.rate_limit
             sleep(60)
     except KeyboardInterrupt:
         pass
@@ -168,4 +172,25 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(
+        description='Microsoft Download Center Archiver',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument('-v', '--verbose',
+                        help='Print more logs', action='store_true')
+    parser.add_argument(
+        '-o', '--output', help='Path of output SQLite3 DB', default='results.db')
+    parser.add_argument('-t', '--timeout', type=int,
+                        help='Timeout in seconds for each request', default=2)
+    parser.add_argument('-w', '--workers', type=int,
+                        help='Number of workers', default=5)
+    parser.add_argument('--rate-limit', type=int,
+                        help='Requests sent in one minute', default=500)
+    options = parser.parse_args()
+
+    if options.verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
+    main(options)
