@@ -13,7 +13,7 @@ RESULTS_DB = 'results.db'
 REQUEST_TIMEOUT = 2
 
 THREAD_POOL_SIZE = 5
-RPM = 500 # Requests Per Minute
+RPM = 500  # Requests Per Minute
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -115,7 +115,7 @@ def archiver(results: Queue, stop: Event):
             count += 1
             if count % 50 == 0:
                 logger.info(f'Archived 50 URLs, last id: {result[0]}')
-            
+
             logger.debug(f'Inserting result with id {result[0]}')
             cur.execute('INSERT INTO results VALUES(?, ?, ?, ?)', result)
             con.commit()
@@ -153,6 +153,8 @@ def main():
                 id_queue.put(_id)
             current_id = current_id + RPM
             sleep(60)
+    except KeyboardInterrupt:
+        pass
     finally:
         logger.info('Shutting down')
         archiver_stop.set()
