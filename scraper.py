@@ -1,3 +1,7 @@
+__author__ = "Ben Lavi"
+__copyright__ = "Copyright (C) 2022 Ben Lavi"
+__version__ = "1.0"
+
 import argparse
 import logging
 import sqlite3
